@@ -1,5 +1,6 @@
 import asyncio
 import matplotlib.pyplot as plt
+import numpy as np
 
 from viam.robot.client import RobotClient
 from viam.rpc.dial import Credentials, DialOptions
@@ -43,6 +44,10 @@ class Data:
         plt.grid()
         plt.savefig('average_weight_data.png')
 
+    def stats(self):
+        print("Average Weight STD: ", np.std(self.avgs))
+        print("Range: +/-", (max(self.avgs)-min(self.avgs))/2)
+
 
 async def connect():
     creds = Credentials(
@@ -79,7 +84,7 @@ async def main():
     await robot.close()
 
     
-async def dispense(serving, samples=100, sample_rate=25, outlier_ratio=0.50, rpm=50, step=1000, offset=0, n=10, inc_step=0.25):
+async def dispense(serving, samples=100, sample_rate=25, outlier_ratio=0.50, rpm=50, offset=0):
     """Function that takes in a serving amount (and other settings) and dispenses that weight
     """
     live_weigh = {'command': 'live-weigh'}
@@ -121,8 +126,24 @@ async def dispense(serving, samples=100, sample_rate=25, outlier_ratio=0.50, rpm
     # Slews motor for absurdly long duration
     await motor.go_for(rpm, 500)
 
-    # Loops through weighing while dispensing w/ p-control
-    while avg > target+offset:
+    # # Loops through weighing while dispensing w/ p-control
+    # while avg > target+offset:
+    #     # Takes new weight sample and updates rolling window, avg
+    #     reading = await scale.do_command(live_weigh)
+    #     last_n = last_n[1:] + [reading['live-weigh']]
+    #     avg = prune(last_n)
+    #     # P-control of conveyor speed
+    #     err = (avg-target)/serving
+    #     # await motor.stop()
+    #     new_rpm = max(err*rpm, 10)
+    #     await motor.go_for(new_rpm, 50)
+    #     # await motor.go_for(50, 50)
+    #     await asyncio.sleep(1/sample_rate)
+    #     data.log_avg(avg)
+    #     data.log_weight(reading['live-weigh'])
+    
+    passed = 0
+    while passed<5:
         # Takes new weight sample and updates rolling window, avg
         reading = await scale.do_command(live_weigh)
         last_n = last_n[1:] + [reading['live-weigh']]
@@ -136,7 +157,9 @@ async def dispense(serving, samples=100, sample_rate=25, outlier_ratio=0.50, rpm
         await asyncio.sleep(1/sample_rate)
         data.log_avg(avg)
         data.log_weight(reading['live-weigh'])
-    
+        if avg>target+offset:
+            passed += 1
+
     # Closes out and takes final weight
     await motor.stop()
     end = await scale.get_readings()
@@ -155,17 +178,65 @@ async def test():
         await asyncio.sleep(1)
     await robot.close()
 
-async def weigh():
+async def weigh(time=10, samples=100, sample_rate=25, outlier_ratio=0.30):
+    live_weigh = {'command': 'live-weigh'}
+
+    # Initialize robot, scale, and motor
     robot = await connect()
     scale = Sensor.from_robot(robot, 'phidgets')
-    weight = await scale.get_readings()
-    print('weight: ', weight['weight'])
+
+    def prune(data_set, ratio=outlier_ratio):
+        """Function that takes in a data set and returns the average, excluding the amount
+        of outliers specified.
+        """
+        outliers = []
+        for _ in range(int(ratio*len(data_set)/2)):
+            outliers += [max(data_set), min(data_set)]
+        weight = (sum(data_set)-sum(outliers))/(len(data_set)-len(outliers))
+        return weight
+
+    # Fills the rolling data set before dispensing begins
+    # Consider using .get_readings instead?
+    weights = []
+    for _ in range(samples):
+        reading = await scale.do_command(live_weigh)
+        weights += [reading['live-weigh']]
+        await asyncio.sleep(1/sample_rate)
+
+    data = Data()
+    # data.log_weight(weights)
+
+    # Preset rolling window (last_n), avg (last_n's average w/out outliers), initial weight
+    last_n = []
+    avg = prune(weights)
+
+    # Loops through weighing while dispensing w/ p-control
+    for _ in range(time*sample_rate):
+        # Takes new weight sample and updates rolling window, avg
+        reading = await scale.do_command(live_weigh)
+        last_n = last_n[1:] + [reading['live-weigh']]
+        avg = prune(last_n)
+        data.log_avg(avg)
+        data.log_weight(reading['live-weigh'])
+        await asyncio.sleep(1/sample_rate)
+    
     await robot.close()
+    return data
+
+
+    # robot = await connect()
+    # scale = Sensor.from_robot(robot, 'phidgets')
+    # weight = await scale.get_readings()
+    # print('weight: ', weight['weight'])
+    # await robot.close()
 
 if __name__ == '__main__':
+    print("Running... ")
     # asyncio.run(main())
-    msg = asyncio.run(dispense(100))
+    # msg = asyncio.run(dispense(100))
+    msg = asyncio.run(weigh(time=10*40, samples=50, sample_rate=25, outlier_ratio=0.50))
     msg.plot_weight_data()
     msg.plot_avg_data()
+    msg.stats()
     # print(msg)
     # asyncio.run(test())
